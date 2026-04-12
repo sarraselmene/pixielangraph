@@ -10,3 +10,6 @@ face_crops/
 openface_output/
 .env
 
+*.mov
+*.mp4
+*.avi
