@@ -3,3 +3,7 @@ opencv-python
 numpy
 ultralytics
 lap
+pandas
+langgraph>=0.2
+groq
+python-dotenv

@@ -8,4 +8,5 @@ face_landmarker.task
 testing_vid/
 face_crops/
 openface_output/
+.env
 
