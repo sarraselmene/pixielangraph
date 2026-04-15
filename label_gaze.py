@@ -96,33 +96,58 @@ def enforce_min_duration(series, min_frames):
 def classify_gaze(row):
     """
     Maps smoothed gaze angles to discrete direction labels + confidence.
-    Returns: gaze_h_label, h_confidence, gaze_v_label, v_confidence
+    Now supports head-relative classification as primary label,
+    and camera-relative (Room) classification for focus analysis.
     """
     if row["is_missing"] or not row["openface_reliable"]:
-        return pd.Series(["Missing", 0.0, "Missing", 0.0])
+        return pd.Series(["Missing", 0.0, "Missing", 0.0, "Missing", "Missing"])
 
-    gx = row["gaze_angle_x_smooth"]
-    gy = row["gaze_angle_y_smooth"]
+    # Camera-relative (Room) Gaze
+    gx_room = row["gaze_angle_x_smooth"]
+    gy_room = row["gaze_angle_y_smooth"]
 
-    # ── Horizontal ──
-    if abs(gx) <= GAZE_H_CENTER_MAX:
+    # Head-relative Gaze (Eyeballs in sockets)
+    # head_yaw/pitch are in degrees, gaze is in radians. 
+    hy_rad = (row["yaw_smooth"] * DEG_TO_RAD) if pd.notna(row["yaw_smooth"]) else 0.0
+    hp_rad = (row["pitch_smooth"] * DEG_TO_RAD) if pd.notna(row["pitch_smooth"]) else 0.0
+    
+    # gx_head_rel: positive means eye is looking more to the right than the head is
+    gx_head_rel = gx_room - hy_rad
+    gy_head_rel = gy_room - hp_rad
+
+    # ── 1. Head-Relative Labeling (requested constraint) ──
+    if abs(gx_head_rel) <= GAZE_H_CENTER_MAX:
         h_label = "Center"
-    elif gx > GAZE_H_CENTER_MAX:
+    elif gx_head_rel > GAZE_H_CENTER_MAX:
         h_label = "Right"
     else:
         h_label = "Left"
-    h_conf = scale_confidence(gx, GAZE_H_CENTER_MAX, GAZE_H_MARGIN)
+    h_conf = scale_confidence(gx_head_rel, GAZE_H_CENTER_MAX, GAZE_H_MARGIN)
 
-    # ── Vertical ──
-    if abs(gy) <= GAZE_V_LEVEL_MAX:
+    if abs(gy_head_rel) <= GAZE_V_LEVEL_MAX:
         v_label = "Level"
-    elif gy > GAZE_V_LEVEL_MAX:
+    elif gy_head_rel > GAZE_V_LEVEL_MAX:
         v_label = "Down"
     else:
         v_label = "Up"
-    v_conf = scale_confidence(gy, GAZE_V_LEVEL_MAX, GAZE_V_MARGIN)
+    v_conf = scale_confidence(gy_head_rel, GAZE_V_LEVEL_MAX, GAZE_V_MARGIN)
 
-    return pd.Series([h_label, h_conf, v_label, v_conf])
+    # ── 2. Room-Relative (Focus) Labeling (for Collective Focus logic) ──
+    if abs(gx_room) <= GAZE_H_CENTER_MAX:
+        rf_h = "Center"
+    elif gx_room > GAZE_H_CENTER_MAX:
+        rf_h = "Right"
+    else:
+        rf_h = "Left"
+        
+    if abs(gy_room) <= GAZE_V_LEVEL_MAX:
+        rf_v = "Level"
+    elif gy_room > GAZE_V_LEVEL_MAX:
+        rf_v = "Down"
+    else:
+        rf_v = "Up"
+
+    return pd.Series([h_label, h_conf, v_label, v_conf, rf_h, rf_v])
 
 
 # ──────────────────────────────────────────────
@@ -190,8 +215,12 @@ def main():
     print(f"\nProcessing {len(grouped)} track(s)...")
 
     for track_id, group_df in grouped:
+        # Setup continuous frame index
         min_frame = group_df["frame_id"].min()
         max_frame = group_df["frame_id"].max()
+
+        # Drop duplicates if any (safety against extraction noise duplicated track detections)
+        group_df = group_df.drop_duplicates(subset=["frame_id"])
         group_df = group_df.set_index("frame_id")
 
         # Reindex to continuous frame range
@@ -204,11 +233,11 @@ def main():
 
         # ── STEP 2: RELIABILITY ──
         # success flag must be 1 AND confidence >= threshold AND head pose reliable
-        pose_rel = reindexed["pose_reliable"].fillna(False).astype(bool)
-        success_ok = reindexed["success"].fillna(0).astype(int) == 1
-        conf_ok = reindexed["confidence"].fillna(0) >= OPENFACE_CONFIDENCE_THRESH
+        success_arr = (reindexed["success"].fillna(0).values.astype(int) == 1)
+        conf_arr    = (reindexed["confidence"].fillna(0).values >= OPENFACE_CONFIDENCE_THRESH)
+        pose_rel_arr = reindexed["pose_reliable"].fillna(False).values.astype(bool)
 
-        reindexed["openface_reliable"] = success_ok & conf_ok & pose_rel
+        reindexed["openface_reliable"] = success_arr & conf_arr & pose_rel_arr
 
         # NaN-out gaze values for unreliable frames (but not originally missing)
         unreliable_mask = ~reindexed["openface_reliable"] & ~reindexed["is_missing_original"]
@@ -272,7 +301,7 @@ def main():
     # STEP 3: CLASSIFICATION
     # ──────────────────────────────────────────────
     print("Applying gaze classification thresholds...")
-    final_df[["gaze_h_label", "h_confidence", "gaze_v_label", "v_confidence"]] = (
+    final_df[["gaze_h_label", "h_confidence", "gaze_v_label", "v_confidence", "room_focus_h", "room_focus_v"]] = (
         final_df.apply(classify_gaze, axis=1)
     )
 
@@ -283,20 +312,21 @@ def main():
     for track_id in final_df["track_id"].unique():
         mask = final_df["track_id"] == track_id
 
-        # Horizontal
+        # Horizontal (Head-Relative)
         original_h = final_df.loc[mask, "gaze_h_label"].copy()
         filtered_h = enforce_min_duration(original_h, gaze_min_frames)
-        suppressed_h = filtered_h == "_suppressed"
-        # Revert suppressed labels to "Center" (neutral) and zero confidence
-        final_df.loc[mask & suppressed_h.values, "gaze_h_label"] = "Center"
-        final_df.loc[mask & suppressed_h.values, "h_confidence"] = 0.0
+        suppressed_h = (filtered_h == "_suppressed")
+        
+        final_df.loc[mask, "gaze_h_label"] = filtered_h.replace("_suppressed", "Center")
+        final_df.loc[original_h.index[suppressed_h], "h_confidence"] = 0.0
 
-        # Vertical
+        # Vertical (Head-Relative)
         original_v = final_df.loc[mask, "gaze_v_label"].copy()
         filtered_v = enforce_min_duration(original_v, gaze_min_frames)
-        suppressed_v = filtered_v == "_suppressed"
-        final_df.loc[mask & suppressed_v.values, "gaze_v_label"] = "Level"
-        final_df.loc[mask & suppressed_v.values, "v_confidence"] = 0.0
+        suppressed_v = (filtered_v == "_suppressed")
+        
+        final_df.loc[mask, "gaze_v_label"] = filtered_v.replace("_suppressed", "Level")
+        final_df.loc[original_v.index[suppressed_v], "v_confidence"] = 0.0
 
     # ──────────────────────────────────────────────
     # STEP 5: FORMAT & SAVE
@@ -314,6 +344,7 @@ def main():
         "gaze_angle_x_smooth", "gaze_angle_y_smooth",
         "gaze_h_label", "h_confidence",
         "gaze_v_label", "v_confidence",
+        "room_focus_h", "room_focus_v",
         "gaze_stability", "eye_head_divergence",
         "is_interpolated", "is_missing", "openface_reliable",
     ]

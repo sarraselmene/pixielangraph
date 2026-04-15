@@ -143,10 +143,12 @@ def main():
     grouped = df.groupby("track_id")
     
     print("Processing individual tracks (smoothing & interpolating)...")
-    for track_id, group_df in grouped:
         # Setup continuous frame index
         min_frame = group_df["frame_id"].min()
         max_frame = group_df["frame_id"].max()
+
+        # Drop duplicates if any (safety against extraction noise duplicated track detections)
+        group_df = group_df.drop_duplicates(subset=["frame_id"])
         group_df = group_df.set_index("frame_id")
         
         full_index = np.arange(min_frame, max_frame + 1)

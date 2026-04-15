@@ -76,6 +76,7 @@ from graph_nodes.body_node          import run_body_labeling
 from graph_nodes.head_pose_node     import run_head_pose_labeling
 from graph_nodes.gaze_node          import run_gaze_labeling
 from graph_nodes.action_units_node  import run_action_units_labeling
+from graph_nodes.face_recognition_node import run_face_recognition
 from graph_nodes.llm_analysis_node  import run_llm_analysis
 
 
@@ -97,6 +98,10 @@ class PipelineState(TypedDict, total=False):
     raw_au_csv:        str
     raw_gaze_csv:      str
     extraction_done:   bool
+    
+    # ── Face Recognition ──
+    identity_map:     dict
+    identity_map_csv: str
 
     # ── Labeled CSVs ──
     body_label_csv:    str
@@ -115,6 +120,9 @@ class PipelineState(TypedDict, total=False):
 
     # ── LLM output ──
     report_text: str
+
+    # ── Context ──
+    teacher_context: str
 
     # ── Error ──
     error: Optional[str]
@@ -194,6 +202,9 @@ def route_after_extraction(state: PipelineState) -> str:
     if not state.get("extraction_done"):
         print("[Router] Extraction failed — aborting pipeline.")
         return END
+    return "face_recognition"
+
+def route_after_face_recognition(state: PipelineState) -> str:
     return "head_pose_labeling"
 
 
@@ -244,6 +255,7 @@ def build_graph() -> StateGraph:
 
     # ── Register nodes ──
     graph.add_node("extraction",       maybe_extract)
+    graph.add_node("face_recognition", run_face_recognition)
     graph.add_node("head_pose_labeling", run_head_pose_labeling)
     graph.add_node("gaze_labeling",    run_gaze_labeling)
     graph.add_node("body_labeling",    run_body_labeling)
@@ -256,7 +268,9 @@ def build_graph() -> StateGraph:
 
     # ── Edges (sequential with conditional routing) ──
     graph.add_conditional_edges("extraction",       route_after_extraction,
-                                {"head_pose_labeling": "head_pose_labeling", END: END})
+                                {"face_recognition": "face_recognition", END: END})
+    graph.add_conditional_edges("face_recognition", route_after_face_recognition,
+                                {"head_pose_labeling": "head_pose_labeling"})
     graph.add_conditional_edges("head_pose_labeling", route_after_head_pose,
                                 {"gaze_labeling": "gaze_labeling"})
     graph.add_conditional_edges("gaze_labeling",    route_after_gaze,
@@ -307,6 +321,11 @@ def parse_args():
         action="store_true",
         help="Skip extraction step and use existing raw CSVs in --output-dir",
     )
+    parser.add_argument(
+        "--teacher-context", "-c",
+        default="",
+        help="Optional qualitative context from the teacher to feed into the clinical evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -351,6 +370,7 @@ def main():
         "groq_api_key":    api_key,
         "groq_model":      model,
         "skip_extraction": args.skip_extraction,
+        "teacher_context": args.teacher_context,
         "error":           None,
     }
 

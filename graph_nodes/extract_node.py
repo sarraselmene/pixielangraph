@@ -16,6 +16,7 @@ import csv
 import os
 import sys
 import types
+import re
 from pathlib import Path
 
 
@@ -94,9 +95,10 @@ def run_extraction(state: dict) -> dict:
     src = script_path.read_text(encoding="utf-8")
 
     # 1. Redirect input video
-    src = src.replace(
-        'INPUT_SOURCE = "testing_vid/own_vid(gaze direction)1.mp4"',
+    src = re.sub(
+        r'INPUT_SOURCE\s*=\s*".*?"',
         f'INPUT_SOURCE = r"{video_path}"',
+        src, count=1
     )
 
     # 2. Redirect output CSVs and temp dirs into work_dir

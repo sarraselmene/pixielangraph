@@ -1,4 +1,4 @@
-"""
+  """
 =============================================================================
 behaviour_classifier_visual.py  —  v11.4  (desk-guard + hip-lock + angular-var)
 =============================================================================
@@ -2218,7 +2218,7 @@ class TrackState:
         #   a) le DeskEstimator se remplit correctement dès les premières frames
         #   b) le score slouch est toujours disponible, même en mode knee
         #   c) le slouching est détecté correctement pour 2 élèves assis
-        dr = self.posture_sm.update(self.kpb, sw, global_desk_y))
+        dr = self.posture_sm.update(self.kpb, sw, global_desk_y)
 
         # ── Mode knee : UNIQUEMENT si les jambes sont vraiment fiables ─────
         # _knees_reliable() filtre les jambes extrapolées derrière le bureau
@@ -3153,21 +3153,16 @@ _RAW_COLS = [
     "posture_method",
     "shoulder_width_px", "desk_y_px",
     "knee_angle_left", "knee_angle_right", "avg_knee_angle",
-    "spine_tilt_deg", "head_desk_norm", "shoulder_desk_norm",
-    "forward_shift_norm", "body_height_norm",
+    "torso_ratio", "nose_shoulder_ratio",
+    "pitch", "yaw", "roll",
+    "au04", "au06", "au12", "au43", "au45", "perclos",
     "slouch_score", "stand_score", "posture", "posture_confidence",
     "bounce_score", "bouncing",
     "bound_score", "bounding",
     "fidget_score", "fidget_type", "best_joint_var", "fidgeting",
-    # ── Colonnes de debug fidget v9 ───────────────────────────────────────
-    # Utiles pour analyser les faux positifs dans pandas/Excel :
-    #   - Comparer lower_var vs wrist_var pour voir si leg_shake ou écriture
-    #   - fft_score proche de 0 = signal non-rythmique (faux positive probable)
-    "fidget_lower_var",   # max variance pondérée visibilité — région jambe
-    "fidget_hip_var",     # max variance pondérée visibilité — région hanche
-    "fidget_wrist_var",   # max variance pondérée visibilité — région poignet
-    "fidget_fft_score",   # peakedness FFT brute du meilleur joint [0,1]
+    "fidget_lower_var", "fidget_hip_var", "fidget_wrist_var", "fidget_fft_score",
     "hand_score", "wrist_above_shoulder", "wrist_vel_up", "hand_raised",
+    "is_sleeping", "is_smiling", "is_fatigued", "is_confused"
 ]
 _SUM_COLS = [
     "track_id", "behaviour",

@@ -201,8 +201,12 @@ def main():
     print(f"\nProcessing {len(grouped)} track(s)...")
 
     for track_id, group_df in grouped:
+        # Setup continuous frame index
         min_frame = group_df["frame_id"].min()
         max_frame = group_df["frame_id"].max()
+        
+        # Drop duplicates if any (safety against extraction noise duplicated track detections)
+        group_df = group_df.drop_duplicates(subset=["frame_id"])
         group_df = group_df.set_index("frame_id")
 
         # Reindex to continuous frame range

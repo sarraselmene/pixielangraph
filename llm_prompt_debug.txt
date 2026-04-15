@@ -1,0 +1,42 @@
+Analysis of Video: aya2.mov
+Identity Map (Track ID -> Student Name): {"1": "Student_1", "2": "Student_2", "16": "Student_16", "19": "Student_19"}
+### Global Body Behaviour Summary
+
+  [Posture Distribution]
+    • sitting: 4323 frames (84.3%)
+    • standing: 803 frames (15.7%)
+
+  [Action/Motor Distribution]
+    • fidgeting: 1986 frames (38.7%)
+    • none: 1639 frames (32.0%)
+    • bouncing: 1432 frames (27.9%)
+    • hand_raised: 69 frames (1.3%)
+
+Head pose data: NOT AVAILABLE
+
+### Gaze Tracking & Focus
+
+  [Eye-in-Socket Orientation (Head-Relative)]
+    • Center: 3990 frames (84.9%)
+    • Missing: 617 frames (13.1%)
+    • Left: 92 frames (2.0%)
+
+  [Classroom Focus (Room-Relative)]
+    • Focus Center: 3905 frames (83.1%)
+    • Focus Missing: 657 frames (14.0%)
+    • Focus Left: 128 frames (2.7%)
+    • Focus Right: 9 frames (0.2%)
+
+  • Mean Gaze Stability Index: 0.974 (Lower indicates high distractibility)
+
+### Facial Action Units & Expressions
+  • Genuine Smile: 373 frames (7.9%)
+  • Fatigue Indicator: 0 frames (0.0%)
+  • Yawning detected: 0 frames (0.0%)
+  • Mean Expressiveness Score: 0.144
+
+--- Individual Track Overviews ---
+Track 1 (Student_1): Body [Posture: sitting: 1678 frames (86.0%), standing: 274 frames (14.0%) | Actions: none: 880 frames (45.1%), bouncing: 684 frames (35.0%), fidgeting: 388 frames (19.9%)] | Gaze Stability: 0.962
+Track 2 (Student_2): Body [Posture: sitting: 2589 frames (97.8%), standing: 57 frames (2.2%) | Actions: fidgeting: 1576 frames (59.6%), none: 682 frames (25.8%), bouncing: 319 frames (12.1%), hand_raised: 69 frames (2.6%)] | Gaze Stability: 0.981
+Track 16 (Student_16): Body [Posture: standing: 291 frames (91.2%), sitting: 28 frames (8.8%) | Actions: bouncing: 287 frames (90.0%), none: 29 frames (9.1%), fidgeting: 3 frames (0.9%)] | Gaze Stability: 0.984
+Track 19 (Student_19): Body [Posture: standing: 181 frames (86.6%), sitting: 28 frames (13.4%) | Actions: bouncing: 142 frames (67.9%), none: 48 frames (23.0%), fidgeting: 19 frames (9.1%)] | Gaze Stability: 0.975

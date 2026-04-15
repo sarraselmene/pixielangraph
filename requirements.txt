@@ -7,3 +7,6 @@ pandas
 langgraph>=0.2
 groq
 python-dotenv
+streamlit
+plotly
+deepface
