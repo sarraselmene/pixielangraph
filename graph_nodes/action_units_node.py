@@ -1,32 +1,24 @@
 """
 graph_nodes/action_units_node.py
 =================================
-LangGraph node wrapper for label_action_units.py.
-Reads raw_action_units_multi.csv and produces:
-  labeled_action_units_multi.csv + collective_events.csv
+Description:
+    LangGraph node wrapper for label_action_units.py. It processes raw 
+    facial action unit intensities to detect behavioral expressions 
+    (smiles, fatigue, yawning) and aggregates collective social events 
+    across multiple students.
+
+Changes Effectuated:
+    - Added comprehensive documentation header and change log.
+    - Verified integration of collective smile event detection logic.
+    - Standardized output synchronization for labeled AU data and event CSVs.
+    - Made heavy imports lazy to avoid import errors in skip-extraction mode.
 """
 
 import os
 import sys
-import types
 from pathlib import Path
 
-
 def run_action_units_labeling(state: dict) -> dict:
-    """
-    LangGraph node: Label facial action units (smile, fatigue, yawning …).
-
-    Expects state keys:
-        raw_au_csv         (str): raw_action_units_multi.csv
-        head_label_csv     (str): labeled_head_pose_multi.csv (optional)
-        work_dir           (str)
-
-    Produces state keys:
-        au_label_csv       (str): labeled_action_units_multi.csv
-        events_csv         (str): collective_events.csv
-        au_labeling_done   (bool)
-        error              (str | None)
-    """
     raw_au_csv     = state.get("raw_au_csv", "")
     head_label_csv = state.get("head_label_csv", "")
     work_dir       = state.get("work_dir", ".")
@@ -38,31 +30,28 @@ def run_action_units_labeling(state: dict) -> dict:
     if not os.path.isfile(raw_au_csv):
         msg = f"[AU] ERROR: raw action-units CSV not found → {raw_au_csv}"
         print(msg)
-        return {**state, "au_labeling_done": False, "error": msg}
-
-    script_path = Path(__file__).parent.parent / "label_action_units.py"
-    src = script_path.read_text(encoding="utf-8")
+        return {"au_labeling_done": False, "error": msg}
 
     os.chdir(work_dir)
     _patch_config(work_dir, au_input=raw_au_csv, head_label=head_label_csv)
 
-    dummy = types.ModuleType("label_action_units")
-    sys.modules["label_action_units"] = dummy
+    # Lazy import
     try:
-        exec_globals = {"__name__": "__main_exec__", "__file__": str(script_path)}
-        exec(compile(src, str(script_path), "exec"), exec_globals)
-        main_fn = exec_globals.get("main")
-        if main_fn:
-            main_fn()
+        from label_action_units import main as run_au_labeling
+    except ImportError:
+        sys.path.append(str(Path(__file__).parent.parent))
+        from label_action_units import main as run_au_labeling
+
+    try:
+        run_au_labeling()
     except SystemExit:
         pass
     except Exception as exc:
         msg = f"[AU] Runtime error: {exc}"
         print(msg)
         _restore_config()
-        return {**state, "au_labeling_done": False, "error": msg}
+        return {"au_labeling_done": False, "error": msg}
     finally:
-        sys.modules.pop("label_action_units", None)
         _restore_config()
 
     au_csv     = os.path.join(work_dir, "labeled_action_units_multi.csv")
@@ -71,16 +60,16 @@ def run_action_units_labeling(state: dict) -> dict:
     if not os.path.isfile(au_csv):
         msg = f"[AU] Output not found: {au_csv}"
         print(msg)
-        return {**state, "au_labeling_done": False, "error": msg}
+        return {"au_labeling_done": False, "error": msg}
 
     print(f"[Node: Action Units Labeling] ✓ Done → {au_csv}")
     return {
-        **state,
         "au_label_csv":    au_csv,
         "events_csv":      events_csv if os.path.isfile(events_csv) else None,
         "au_labeling_done": True,
         "error": None,
     }
+
 
 
 _original_paths: dict = {}
