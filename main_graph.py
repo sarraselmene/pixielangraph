@@ -1,50 +1,32 @@
-#!/usr/bin/env python3
 """
 main_graph.py
 =============
-Pixie Behavioral Analysis Pipeline — LangGraph Orchestrator
-============================================================
+Description:
+    The central orchestrator for the Pixie Behavioral Analysis Pipeline. 
+    It leverages LangGraph to manage a directed acyclic graph (DAG) of 
+    extraction, labeling, merging, preprocessing, LSTM prediction, 
+    LLM analysis, and dashboard output nodes.
+    
+    The pipeline processes video data to generate:
+      - full_analysis.csv (merged sensor data)
+      - processed_features.npy (LSTM-ready features)
+      - lstm_predictions.csv (engagement scores & risk levels)
+      - Clinical behavioral report (via Groq LLM)
+      - Interactive HTML dashboard with Flask API
 
-Graph topology:
-                         ┌─────────────────┐
-                         │   extraction    │  (extract_raw_data2.py)
-                         └────────┬────────┘
-                                  │ raw CSVs
-              ┌───────────────────┼───────────────────┐
-              ▼                   ▼                   ▼
-     ┌──────────────┐   ┌──────────────┐   ┌──────────────────┐
-     │ head_pose    │   │ body_label   │   │  action_units    │
-     └──────┬───────┘   └──────────────┘   └──────────────────┘
-            │ labeled_head_pose_multi.csv
-            ▼
-     ┌──────────────┐
-     │ gaze_label   │   (needs head pose for reliability check)
-     └──────────────┘
-              │
-              └──────────── (all 4 labeled CSVs) ──────────────┐
-                                                               ▼
-                                                      ┌──────────────┐
-                                                      │ llm_analysis │
-                                                      └──────┬───────┘
-                                                             │ report_text
-                                                             ▼
-                                                      ┌──────────────┐
-                                                      │  save_report │
-                                                      └──────────────┘
+Pipeline Topology (v3 — with preprocessor, LSTM, and Flask dashboard):
 
-Usage
-─────
-    python main_graph.py --video /path/to/video.mov [--api-key YOUR_GROQ_KEY]
+    tracking → openface_raw → headpose_raw → head_pose_labeling
+             → gaze_labeling → au_labeling → body_labeling
+             → face_recognition → merge_node → preprocessor_node
+             → lstm_node → llm_analysis → output_node → save_report → END
 
-    # or set GROQ_API_KEY environment variable
-    export GROQ_API_KEY=gsk_...
-    python main_graph.py --video aya2.mov
-
-    # Skip extraction (use existing raw CSVs):
-    python main_graph.py --video aya2.mov --skip-extraction
-
-    # Specify output directory:
-    python main_graph.py --video aya2.mov --output-dir ./results
+Data Flow:
+    [5 labeled CSVs] → merge_node → full_analysis.csv
+                     → preprocessor_node → processed_features.npy
+                     → lstm_node → lstm_predictions.csv (scores)
+                     → llm_analysis → report_text (uses scores)
+                     → output_node → Dashboard + Flask API + HTML
 """
 
 import argparse
@@ -59,29 +41,44 @@ try:
     from dotenv import load_dotenv
     _env_path = Path(__file__).parent / ".env"
     if _env_path.exists():
-        load_dotenv(dotenv_path=_env_path, override=False)  # override=False: CLI args win
+        load_dotenv(dotenv_path=_env_path, override=False)
         print(f"[.env] Loaded → {_env_path}")
 except ImportError:
-    pass  # python-dotenv not installed — fall back to shell env vars
+    pass
 
 # ── Make sure graph_nodes is importable ───────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).parent))
 
+import operator
 from langgraph.graph import StateGraph, END
-from typing import TypedDict, Optional
+from typing import TypedDict, Optional, Annotated, Union
 
 # ── Node imports ──────────────────────────────────────────────────────────────
-from graph_nodes.extract_node       import run_extraction
-from graph_nodes.body_node          import run_body_labeling
-from graph_nodes.head_pose_node     import run_head_pose_labeling
-from graph_nodes.gaze_node          import run_gaze_labeling
-from graph_nodes.action_units_node  import run_action_units_labeling
-from graph_nodes.llm_analysis_node  import run_llm_analysis
+from graph_nodes.extract_node            import run_extraction_node
+from graph_nodes.head_pose_labeling_node import run_head_pose_labeling
+from graph_nodes.body_node               import run_body_labeling
+from graph_nodes.gaze_node               import run_gaze_labeling
+from graph_nodes.action_units_node       import run_action_units_labeling
+from graph_nodes.face_recognition_node   import run_face_recognition
+from graph_nodes.merge_node              import run_merge_node
+from graph_nodes.preprocessor_node       import run_preprocessor_node
+from graph_nodes.lstm_node               import run_lstm_node
+from graph_nodes.llm_analysis_node       import run_llm_analysis
+from graph_nodes.output_node             import run_output_node
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # STATE SCHEMA
 # ──────────────────────────────────────────────────────────────────────────────
+
+def add_errors(left: Optional[list[str]], right: Union[Optional[list[str]], str, None]) -> list[str]:
+    res = list(left) if left is not None else []
+    if right is not None:
+        if isinstance(right, str):
+            res.append(right)
+        elif isinstance(right, list):
+            res.extend(right)
+    return res
 
 class PipelineState(TypedDict, total=False):
     # ── Inputs ──
@@ -91,12 +88,20 @@ class PipelineState(TypedDict, total=False):
     groq_model:      str
     skip_extraction: bool
 
+    # ── Synchronization ──
+    tracking_done:    bool
+    face_crops_dir:   str
+
     # ── Raw CSVs (extraction output) ──
     raw_body_csv:      str
     raw_head_pose_csv: str
     raw_au_csv:        str
     raw_gaze_csv:      str
     extraction_done:   bool
+    
+    # ── Face Recognition ──
+    identity_map:     dict
+    identity_map_csv: str
 
     # ── Labeled CSVs ──
     body_label_csv:    str
@@ -106,52 +111,40 @@ class PipelineState(TypedDict, total=False):
     au_label_csv:      str
     events_csv:        Optional[str]
 
+    # ── Merge output ──
+    full_analysis_csv:  str
+    merge_done:         bool
+
+    # ── Preprocessor output ──
+    processed_features_npy:  str
+    processed_metadata_csv:  str
+    preprocessor_done:       bool
+
+    # ── LSTM output ──
+    lstm_predictions_csv: str
+    lstm_done:            bool
+
     # ── Status flags ──
     body_labeling_done:    bool
     head_labeling_done:    bool
     gaze_labeling_done:    bool
     au_labeling_done:      bool
     llm_done:              bool
+    output_done:           bool
 
     # ── LLM output ──
     report_text: str
 
+    # ── Output node ──
+    session_report_html:  str
+    session_summary_json: str
+    n_alerts:             int
+
+    # ── Context ──
+    teacher_context: str
+
     # ── Error ──
-    error: Optional[str]
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CONDITIONAL SKIP-EXTRACTION NODE
-# ──────────────────────────────────────────────────────────────────────────────
-
-def maybe_extract(state: PipelineState) -> PipelineState:
-    """
-    If --skip-extraction was passed (and raw CSVs already exist),
-    populate the raw CSV paths from the work_dir and skip the heavy extraction.
-    Otherwise, delegate to run_extraction.
-    """
-    if state.get("skip_extraction"):
-        work_dir = state.get("work_dir", ".")
-        body_csv      = os.path.join(work_dir, "raw_body_multi.csv")
-        head_pose_csv = os.path.join(work_dir, "raw_head_pose_multi.csv")
-        au_csv        = os.path.join(work_dir, "raw_action_units_multi.csv")
-        gaze_csv      = os.path.join(work_dir, "raw_gaze_multi.csv")
-        missing = [p for p in [body_csv, head_pose_csv, au_csv, gaze_csv]
-                   if not os.path.isfile(p)]
-        if missing:
-            msg = f"[maybe_extract] --skip-extraction set but CSVs missing: {missing}"
-            print(msg)
-            return {**state,
-                    "raw_body_csv": body_csv, "raw_head_pose_csv": head_pose_csv,
-                    "raw_au_csv": au_csv, "raw_gaze_csv": gaze_csv,
-                    "extraction_done": False, "error": msg}
-        print("[maybe_extract] ✓ Skipping extraction — using existing raw CSVs.")
-        return {**state,
-                "raw_body_csv": body_csv, "raw_head_pose_csv": head_pose_csv,
-                "raw_au_csv": au_csv, "raw_gaze_csv": gaze_csv,
-                "extraction_done": True, "error": None}
-    else:
-        return run_extraction(state)
+    error: Annotated[list[str], add_errors]
 
 
 def save_report(state: PipelineState) -> PipelineState:
@@ -168,7 +161,7 @@ def save_report(state: PipelineState) -> PipelineState:
 **Video:** {state.get("video_path", "N/A")}
 **Generated:** {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
 **Model:** {state.get("groq_model", "llama-3.3-70b-versatile")}
-**Pipeline:** LangGraph Multimodal Behavioral Analysis
+**Pipeline:** LangGraph + BiLSTM + Groq LLM (v3)
 
 ---
 
@@ -178,61 +171,24 @@ def save_report(state: PipelineState) -> PipelineState:
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(full_report)
 
+    # ── Print session summary ─────────────────────────────────────────────────
     print(f"\n{'='*60}")
     print(f"  ✅ Report saved → {report_path}")
+
+    lstm_csv = state.get("lstm_predictions_csv", "")
+    if lstm_csv and os.path.isfile(lstm_csv):
+        print(f"  📊 LSTM predictions → {lstm_csv}")
+
+    html_report = state.get("session_report_html", "")
+    if html_report and os.path.isfile(html_report):
+        print(f"  📄 Dashboard → {html_report}")
+
+    n_alerts = state.get("n_alerts", 0)
+    print(f"  🚨 Alerts: {n_alerts}")
+    print(f"  🌐 Flask API: http://localhost:5050")
     print(f"{'='*60}\n")
-    print(full_report)
 
-    return {**state, "report_path": report_path}
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# ROUTING HELPERS (conditional edges)
-# ──────────────────────────────────────────────────────────────────────────────
-
-def route_after_extraction(state: PipelineState) -> str:
-    if not state.get("extraction_done"):
-        print("[Router] Extraction failed — aborting pipeline.")
-        return END
-    return "head_pose_labeling"
-
-
-def route_after_head_pose(state: PipelineState) -> str:
-    if not state.get("head_labeling_done"):
-        print("[Router] Head pose labeling failed — continuing without it.")
-    # Always continue — gaze and AU can degrade gracefully without head pose
-    return "gaze_labeling"
-
-
-def route_after_gaze(state: PipelineState) -> str:
-    # Always continue to body labeling
-    return "body_labeling"
-
-
-def route_after_body(state: PipelineState) -> str:
-    # Always continue to AU labeling
-    return "au_labeling"
-
-
-def route_after_au(state: PipelineState) -> str:
-    # Proceed to LLM — requires at least one labeled CSV
-    any_data = any([
-        state.get("body_label_csv"),
-        state.get("head_label_csv"),
-        state.get("gaze_label_csv"),
-        state.get("au_label_csv"),
-    ])
-    if not any_data:
-        print("[Router] No labeled data available — aborting LLM step.")
-        return END
-    return "llm_analysis"
-
-
-def route_after_llm(state: PipelineState) -> str:
-    if not state.get("llm_done"):
-        print("[Router] LLM analysis failed.")
-        return END
-    return "save_report"
+    return {"report_path": report_path}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -243,31 +199,44 @@ def build_graph() -> StateGraph:
     graph = StateGraph(PipelineState)
 
     # ── Register nodes ──
-    graph.add_node("extraction",       maybe_extract)
+    graph.add_node("extraction",         run_extraction_node)
+    
+    graph.add_node("face_recognition",   run_face_recognition)
     graph.add_node("head_pose_labeling", run_head_pose_labeling)
-    graph.add_node("gaze_labeling",    run_gaze_labeling)
-    graph.add_node("body_labeling",    run_body_labeling)
-    graph.add_node("au_labeling",      run_action_units_labeling)
-    graph.add_node("llm_analysis",     run_llm_analysis)
-    graph.add_node("save_report",      save_report)
+    graph.add_node("gaze_labeling",      run_gaze_labeling)
+    graph.add_node("body_labeling",      run_body_labeling)
+    graph.add_node("au_labeling",        run_action_units_labeling)
+
+    graph.add_node("merge",              run_merge_node)
+    graph.add_node("preprocessor",       run_preprocessor_node)
+    graph.add_node("lstm",               run_lstm_node)
+    graph.add_node("llm_analysis",       run_llm_analysis)
+    graph.add_node("output",             run_output_node)
+    graph.add_node("save_report",        save_report)
 
     # ── Entry point ──
     graph.set_entry_point("extraction")
 
-    # ── Edges (sequential with conditional routing) ──
-    graph.add_conditional_edges("extraction",       route_after_extraction,
-                                {"head_pose_labeling": "head_pose_labeling", END: END})
-    graph.add_conditional_edges("head_pose_labeling", route_after_head_pose,
-                                {"gaze_labeling": "gaze_labeling"})
-    graph.add_conditional_edges("gaze_labeling",    route_after_gaze,
-                                {"body_labeling": "body_labeling"})
-    graph.add_conditional_edges("body_labeling",    route_after_body,
-                                {"au_labeling": "au_labeling"})
-    graph.add_conditional_edges("au_labeling",      route_after_au,
-                                {"llm_analysis": "llm_analysis", END: END})
-    graph.add_conditional_edges("llm_analysis",     route_after_llm,
-                                {"save_report": "save_report", END: END})
-    graph.add_edge("save_report", END)
+    # ── Sequential Pipeline ───────────────────────────────────────────────────
+    # Extraction
+    graph.add_edge("extraction",         "head_pose_labeling")
+    
+    # Labeling
+    graph.add_edge("head_pose_labeling", "gaze_labeling")
+    graph.add_edge("gaze_labeling",      "au_labeling")
+    graph.add_edge("au_labeling",        "body_labeling")
+    graph.add_edge("body_labeling",      "face_recognition")
+
+    # Synthesis: merge → preprocess → lstm → llm → output
+    graph.add_edge("face_recognition",   "merge")
+    graph.add_edge("merge",              "preprocessor")
+    graph.add_edge("preprocessor",       "lstm")
+    graph.add_edge("lstm",               "llm_analysis")
+    
+    # Output
+    graph.add_edge("llm_analysis",       "output")
+    graph.add_edge("output",             "save_report")
+    graph.add_edge("save_report",        END)
 
     return graph.compile()
 
@@ -278,35 +247,19 @@ def build_graph() -> StateGraph:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Pixie — Multimodal Behavioral Analysis Pipeline (LangGraph + Groq)",
+        description="Pixie — Multimodal Behavioral Analysis Pipeline (LangGraph + BiLSTM + Groq)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
     )
     parser.add_argument(
         "--video", "-v",
         default="/Users/sarahselmene/Desktop/langtarak/Pixie/aya2.mov",
-        help="Path to the input video file (default: aya2.mov in project dir)",
+        help="Path to the input video file",
     )
-    parser.add_argument(
-        "--api-key", "-k",
-        default=None,
-        help="Groq API key (or set GROQ_API_KEY env var)",
-    )
-    parser.add_argument(
-        "--model", "-m",
-        default="llama-3.3-70b-versatile",
-        help="Groq model ID (default: llama-3.3-70b-versatile)",
-    )
-    parser.add_argument(
-        "--output-dir", "-o",
-        default=None,
-        help="Directory to save all output CSVs and the report (default: same as video)",
-    )
-    parser.add_argument(
-        "--skip-extraction",
-        action="store_true",
-        help="Skip extraction step and use existing raw CSVs in --output-dir",
-    )
+    parser.add_argument("--api-key", "-k", default=None, help="Groq API key")
+    parser.add_argument("--model", "-m", default="llama-3.3-70b-versatile", help="Groq model ID")
+    parser.add_argument("--output-dir", "-o", default=None, help="Output directory")
+    parser.add_argument("--skip-extraction", action="store_true", help="Skip extraction, use existing CSVs")
+    parser.add_argument("--teacher-context", "-c", default="", help="Optional teacher context for LLM")
     return parser.parse_args()
 
 
@@ -320,30 +273,31 @@ def main():
 
     os.makedirs(work_dir, exist_ok=True)
 
-    # Add work_dir to sys.path so config.py is importable from there
     if work_dir not in sys.path:
         sys.path.insert(0, work_dir)
-    # Also add project root (where config.py lives)
     project_root = str(Path(__file__).parent)
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║          PIXIE — Behavioral Analysis Pipeline                 ║
-║          Powered by LangGraph + Groq LLM                      ║
+║          PIXIE — Behavioral Analysis Pipeline  v3            ║
+║          LangGraph + BiLSTM + Groq LLM + Flask               ║
 ╚══════════════════════════════════════════════════════════════╝
   Video      : {video_path}
   Work dir   : {work_dir}
-  Model      : {args.model}
+  Model      : {model}
   Skip extrac: {args.skip_extraction}
-  API key    : {'✓ set' if api_key else '✗ MISSING — LLM step will fail'}
+  API key    : {'✓ set' if api_key else '✗ MISSING'}
+
+  Pipeline topology (v3):
+    tracking → openface → headpose → labeling (head/gaze/au/body)
+    → face_recognition → merge → preprocessor → lstm
+    → llm_analysis → output (dashboard + Flask) → save_report → END
 """)
 
     if not api_key:
-        print("⚠️  WARNING: No Groq API key found. Set GROQ_API_KEY or pass --api-key.")
-        print("   The pipeline will run all extraction/labeling steps but the LLM")
-        print("   analysis will fail. To test without a key run with --skip-extraction\n")
+        print("⚠️  WARNING: No Groq API key found. LLM analysis will fail.")
 
     initial_state: PipelineState = {
         "video_path":      video_path,
@@ -351,6 +305,7 @@ def main():
         "groq_api_key":    api_key,
         "groq_model":      model,
         "skip_extraction": args.skip_extraction,
+        "teacher_context": args.teacher_context,
         "error":           None,
     }
 
@@ -364,12 +319,27 @@ def main():
     m, s   = divmod(rem, 60)
     print(f"\n[Pipeline] Total elapsed: {int(h):02d}:{int(m):02d}:{s:05.2f}")
 
-    if final_state.get("error") and not final_state.get("llm_done"):
-        print(f"\n[Pipeline] ⚠️  Completed with errors: {final_state['error']}")
-        sys.exit(1)
-    else:
-        report_path = final_state.get("report_path", "N/A")
-        print(f"\n[Pipeline] ✅ Done! Report → {report_path}")
+    if final_state.get("error"):
+        print(f"\n[Pipeline] ⚠️  Completed with warnings/errors: {final_state['error']}")
+        if not final_state.get("output_done"):
+            sys.exit(1)
+    
+    print(f"\n[Pipeline] ✅ Done!")
+    print(f"  📝 Clinical Report : {final_state.get('report_path', 'N/A')}")
+    print(f"  📄 Dashboard       : {final_state.get('session_report_html', 'N/A')}")
+    print(f"  📊 LSTM Predictions: {final_state.get('lstm_predictions_csv', 'N/A')}")
+    print(f"  🚨 Alerts          : {final_state.get('n_alerts', 0)}")
+    print(f"  🌐 Flask API       : http://localhost:5050")
+
+    # Keep the process alive so Flask can serve the dashboard
+    if final_state.get("output_done"):
+        print(f"\n  💡 Dashboard is running at http://localhost:5050")
+        print(f"     Press Ctrl+C to stop.\n")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n[Pipeline] Shutting down.")
 
 
 if __name__ == "__main__":
